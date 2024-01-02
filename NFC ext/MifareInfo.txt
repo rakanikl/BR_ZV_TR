@@ -1,0 +1,1052 @@
+// Mifare extension for App Inventor by Marco Perrone
+
+package mifare.info;
+
+import com.google.appinventor.components.runtime.*;
+import android.app.Activity;
+import android.content.Intent;
+
+/* Used for  foreground dispatch
+import android.app.PendingIntent;
+import android.content.IntentFilter;
+import android.content.IntentFilter.MalformedMimeTypeException;	
+*/
+			
+import android.nfc.NfcAdapter;
+import android.nfc.Tag;
+import android.util.Log;
+import android.nfc.tech.MifareClassic;
+import android.nfc.tech.MifareUltralight;
+
+/* other NFC technology to implement in the future
+import android.nfc.tech.NfcA;
+import android.nfc.tech.Ndef;
+import android.nfc.tech.NdefFormatable;
+*/
+
+import com.google.appinventor.components.annotations.DesignerComponent;
+import com.google.appinventor.components.annotations.DesignerProperty;
+import com.google.appinventor.components.annotations.PropertyCategory;
+import com.google.appinventor.components.annotations.SimpleFunction;
+import com.google.appinventor.components.annotations.SimpleEvent;
+import com.google.appinventor.components.annotations.SimpleObject;
+import com.google.appinventor.components.annotations.SimpleProperty;
+import com.google.appinventor.components.annotations.UsesPermissions;
+import com.google.appinventor.components.annotations.UsesActivities;
+import com.google.appinventor.components.annotations.UsesActivityMetadata;
+import com.google.appinventor.components.annotations.androidmanifest.*;
+import com.google.appinventor.components.common.ComponentCategory;
+import com.google.appinventor.components.common.PropertyTypeConstants;
+import com.google.appinventor.components.common.YaVersion;
+import com.google.appinventor.components.runtime.util.GingerbreadUtil;
+import com.google.appinventor.components.runtime.util.SdkLevel;
+
+import java.io.IOException;
+
+/*used when i want to save the log file on the phone for some check
+import java.io.File;
+import java.io.FileWriter;
+import java.io.BufferedWriter;
+import java.io.StringWriter;
+import java.io.PrintWriter;
+*/
+
+
+
+/**
+ * Non-visible component to provides NFC functions
+ * for Mifare Classic and Mifare Ultralight
+ *(if supported by the device).
+ * **Note:** This component will only work on Screen1 of any App Inventor app.
+ */
+@DesignerComponent(version = YaVersion.NEARFIELD_COMPONENT_VERSION,
+    description = "<p>Non-visible component to provide MIFARE Info.  " +
+    "The component provides NFC functions" +
+	"for Mifare Classic and Mifare Ultralight" +
+    "(if supported by the device)</p>" +
+    "<p><strong>Note:</strong> This component will only work on Screen1 of" +
+    " any App Inventor app.</p>",
+    category = ComponentCategory.EXTENSION,
+    nonVisible = true,
+    iconName = "images/nearfield.png")
+
+@SimpleObject(external=true)
+@UsesPermissions(permissionNames = "android.permission.NFC")
+//Permission used when i want to save the log file on memory for some check
+//@UsesPermissions(permissionNames = "android.permission.NFC,android.permission.WRITE_EXTERNAL_STORAGE")
+
+//MifareClassic and MifareUltralight need TAG_DISCOVERED in the manifest
+@UsesActivities(
+	activities = {
+		@ActivityElement(
+			intentFilters = {
+				@IntentFilterElement(
+					actionElements = {	
+						@ActionElement(
+							name = "android.nfc.action.TAG_DISCOVERED"
+						)
+					}, 
+					categoryElements = {
+						@CategoryElement(
+							name = "android.intent.category.DEFAULT"
+						)
+					}
+				)
+			}	
+			,launchMode="singleTask"
+			,name=".Screen1"
+		)
+	}
+)
+/* to recognize all NFC technologies 
+@UsesActivities(
+	activities = {
+		@ActivityElement(
+			intentFilters = {
+				@IntentFilterElement(
+					actionElements = {
+						@ActionElement(
+							name = "android.nfc.action.NDEF_DISCOVERED"
+						),
+						@ActionElement(
+							name = "android.nfc.action.TECH_DISCOVERED"
+						),
+						@ActionElement(
+							name = "android.nfc.action.TAG_DISCOVERED"
+						)
+					}, 
+					categoryElements = {
+						@CategoryElement(
+							name = "android.intent.category.DEFAULT"
+						)
+					}
+				)
+			}	
+			,launchMode="singleTask"
+			,name=".Screen1"
+		)
+	}
+)
+
+@UsesActivityMetadata(
+	metaDataElements = {
+		@MetaDataElement( 
+			name = "android.nfc.action.TECH_DISCOVERED", resource = "@xml/nfc_tech_list"
+		)
+	}
+)
+*/
+public class MifareInfo extends AndroidNonvisibleComponent
+
+implements OnStopListener, OnResumeListener, OnPauseListener, OnNewIntentListener, Deleteable {
+  private static final String TAG = "nearfield";
+  private Activity activity;
+
+  private NfcAdapter nfcAdapter;
+  /* Used for  foreground dispatch
+  private PendingIntent mPendingIntent;
+  private IntentFilter[] mFilters;
+  private String[][] mTechLists;
+  */
+  private boolean readMode = true;
+  private int writeType;
+  private String LastUid = "";
+  private String LastType = "";
+  private int LastSize = 0;
+  private int LastBlocks = 0;
+  private int LastSectors = 0;
+  private String textToWrite = "";
+  private String AuthKeyA = "";
+  private String PasswordEV1 = "";
+  private String PackEV1 = "";
+  private Tag tag;
+  private int cfgOffset = -1;
+
+  /* Used to identify the call to startActivityForResult. Will be passed back into the
+  resultReturned() callback method. */
+  protected int requestCode;
+
+  /**
+   * Creates a new NearField component
+   * @param container  ignored (because this is a non-visible component)
+   */
+  public MifareInfo(ComponentContainer container) {
+    super(container.$form());
+    activity = container.$context();
+	
+
+    writeType = 1;
+    nfcAdapter = (SdkLevel.getLevel() >= SdkLevel.LEVEL_GINGERBREAD)
+        ? GingerbreadUtil.newNfcAdapter(activity)
+        : null;
+    // register with the forms to that OnResume and OnNewIntent
+    // messages get sent to this component
+    form.registerForOnResume(this);
+    form.registerForOnNewIntent(this);
+    form.registerForOnPause(this);
+    Log.d(TAG, "Nearfield component created");
+  }
+
+  // Events
+
+  /**
+   * The UID of the MifareClassic & Mifareultralight Tag read
+   */
+  @SimpleEvent(description = "Get UID Tag")
+  public void GetUid(String TagUid) {
+    Log.d(TAG, "Uid: got message " + TagUid);
+    LastUid = TagUid;
+    EventDispatcher.dispatchEvent(this, "GetUid", TagUid);
+  }
+  /**
+   * The Type of the MifareClassic & Mifareultralight Tag read
+   */
+  @SimpleEvent(description = "Get Type of the Tag")
+  public void GetType(String TagType) {
+    Log.d(TAG, "Type: got message " + TagType);
+	LastType = TagType;
+    EventDispatcher.dispatchEvent(this, "GetType", TagType);
+  }
+  /**
+   * The Size of the MifareClassic Tag read
+   */
+  @SimpleEvent(description = "Get Size of the MifareClassic Tag")
+  public void GetSize(int TagSize) {
+    Log.d(TAG, "Size: got message " + TagSize);
+	LastSize = TagSize;
+    EventDispatcher.dispatchEvent(this, "GetSize", TagSize);
+  }
+  /**
+   * The number of Sectors of the MifareClassic Tag read
+   */
+  @SimpleEvent(description = "Get Sectors number of the MifareClassic Tag")
+  public void GetSectors(int TagSectors) {
+    Log.d(TAG, "Sectors: got message " + TagSectors);
+	LastSectors = TagSectors;
+    EventDispatcher.dispatchEvent(this, "GetSectors", TagSectors);
+  }
+  /**
+   * The number of Blocks of the MifareClassic Tag read
+   */
+  @SimpleEvent(description = "Get Blocks number of the MifareClassic Tag")
+  public void GetBlocks(int TagBlocks) {
+    Log.d(TAG, "Blocks: got message " + TagBlocks);
+	LastBlocks = TagBlocks;
+    EventDispatcher.dispatchEvent(this, "GetBlocks", TagBlocks);
+  }
+  /**
+   * The MifareClassic Block read
+   */
+  @SimpleEvent(description = "Read a block of the MifareClassic Tag")
+  public void GetMifareClassicBlock(String  BlockRead) {
+    Log.d(TAG, "BlockRead: got message " + BlockRead);
+    EventDispatcher.dispatchEvent(this, "GetMifareClassicBlock", BlockRead);
+  }
+  
+  /**
+   * The MifareUltralight Pages read
+   */
+  @SimpleEvent(description = "Read Pages of the MifareUltralight Tag")
+  public void GetMifareUltralightPages(String  Page) {
+    Log.d(TAG, "Pages Read: got message " + Page);
+    EventDispatcher.dispatchEvent(this, "GetMifareUltralightPages", Page);
+  }
+  
+
+  // Properties
+
+  /**
+   * Returns the UID of the last MifareClassic or Mifareultralight Tag Read.
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR)
+  public String LastReadUid() {
+    Log.d(TAG, "Last UID");
+    return LastUid;
+  }
+  /**
+   * Returns the Type of the last MifareClassic Tag Read.
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR)
+  public String LastReadType() {
+    Log.d(TAG, "Last Type");
+    return LastType;
+  }
+  /**
+   * Returns the Size of the last MifareClassic Tag Read.
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR)
+  public int LastReadSize() {
+    Log.d(TAG, "Last Szize");
+    return LastSize;
+  }
+  /**
+   * Returns the number of Sectors of the last MifareClassic Tag Read.
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR)
+  public int LastReadSectors() {
+    Log.d(TAG, "Last Sectors");
+    return LastSectors;
+  }
+  /**
+   * Returns the number of Blocks of the last MifareClassic Tag Read.
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR)
+  public int LastReadBlocks() {
+    Log.d(TAG, "Last Read Blocks");
+    return LastBlocks;
+  }
+  
+
+  /**
+   * Returns true if in read mode, false if in write mode.
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_BOOLEAN,
+      defaultValue = "True")
+
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR)
+  public boolean ReadMode() {
+    Log.d(TAG, "boolean method stared");
+    return readMode;
+  }
+
+  /**
+   * Specifies whether the NFC hardware should operate in read mode (`true`{:.logic.block}) or
+   * write mode (`false`{:.logic.block}).
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR,
+      description = "Specifies whether the NFC hardware should operate in read or write mode.")
+  public void ReadMode(boolean newMode) {
+    Log.d(TAG, "Read mode set to" + newMode);
+    readMode = newMode;
+    if(!readMode && SdkLevel.getLevel() >= SdkLevel.LEVEL_GINGERBREAD){
+      GingerbreadUtil.enableNFCWriteMode(activity, nfcAdapter, textToWrite);
+    }
+  }
+  
+  /**
+   * Specifies  the content of the AuthenticationKey A for a MifareClassic
+   * 
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR,
+      description = "Specifies the content of the AuthenticationKey A for a MifareClassic Tag")
+  public void AuthenticationKeyA(String keyA) {
+    Log.d(TAG, "AuthenticationKeyA " + keyA);
+    AuthKeyA = keyA; 
+  }
+  
+  /**
+   * Specifies  the content of the PasswordEV1 for a MifareultralightEv1
+   * 
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR,
+      description = "Specifies  the content of the PasswordEV1 A for a MifareultralightEv1 Tag")
+  public void MifareUltralightEV1Password(String Password) {
+    Log.d(TAG, "PasswordEV1 " + Password);
+    PasswordEV1 = Password; 
+  }
+  
+  /**
+   * Specifies  the content of the PackEV1 for a MifareultralightEv1
+   * 
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR,
+      description = "Specifies  the content of the PackEV1 for a MifareultralightEv1 Tag")
+  public void MifareUltralightEV1Pack(String Pack) {
+    Log.d(TAG, "PackEV1 " + Pack);
+    PackEV1 = Pack; 
+  }
+  
+  /**
+   * Read the MifareClassic Block specified after the authenticationA
+   * 
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR,
+      description = "Read a MifareClassic Block specified after the authentication.")
+  public void readMifareClassicBlock(int Block) {
+    Log.d(TAG, "Mifare Classic Block to read" + Block);
+    if(readMode == true){
+      if(SdkLevel.getLevel() >= SdkLevel.LEVEL_GINGERBREAD){
+        rMCB(Block);
+      }
+    }
+  }
+  /**
+   * Read MifareULtralight  Pages
+   * 
+   */
+  @SimpleProperty(category = PropertyCategory.BEHAVIOR,
+      description = "Read the MifareULtralight Pages ")
+  public void readMifareUltraLightPages(int offsetPages) {
+    Log.d(TAG, "Mifare Ultralight Pages to read" + offsetPages);
+    if(readMode == true){
+      if(SdkLevel.getLevel() >= SdkLevel.LEVEL_GINGERBREAD){
+        rMCB(offsetPages);
+      }
+    }
+  }
+  
+  /**
+   * Write the Block specified after the authenticationA
+   * 
+   */
+  @SimpleFunction(description = "Write the MifareClassic Block specified after the authentication.")
+  public void writeMifareClassicBlock(int Block, String DataToWrite) {
+	 Log.d(TAG, "Mifare Classic Block to write" + Block);
+    if(readMode == false){
+      if(SdkLevel.getLevel() >= SdkLevel.LEVEL_GINGERBREAD){
+        wMCB(Block,DataToWrite);
+      }
+    } 
+  }
+  
+  /**
+   * Write the Page specified for a MifareUltralight Tag
+   * 
+   */
+  @SimpleFunction(description = "Write the MifareULtralight Page specified .")
+  public void writeMifareUltraLightPage(int Pages, String DataToWrite) {
+	 Log.d(TAG, "Mifare Ultralight Page to write" + Pages);
+    if(readMode == false){
+      if(SdkLevel.getLevel() >= SdkLevel.LEVEL_GINGERBREAD){
+        wMCB(Pages,DataToWrite);
+      }
+    } 
+  }
+  
+  /**
+   * Set the Password and Pack for MifareUltralightEV1 
+   * 
+   */
+  @SimpleFunction(description = "Set the password and pack for MifareUltralightEV1.")
+  public void setMifareultralightEV1(String Password, String Pack) {
+	 Log.d(TAG, "Set the password for MifareUltralightEV1" + Password + " " + Pack );
+    if(readMode == false){
+      if(SdkLevel.getLevel() >= SdkLevel.LEVEL_GINGERBREAD){
+        setMULEV1PwdPack(Password, Pack);
+		PasswordEV1 = Password;
+		PackEV1 = Pack;
+      }
+    } 
+  }
+  
+  
+  /**
+   * Enable/Disable Password Protection for MifareUltralightEV1 
+   * 
+   */
+  @SimpleFunction(description = "Enable password protection for MifareUltralightEV1.")
+  public void enablePasswordProtectionMifareultralightEV1(boolean Enable, int PageNumber) {
+	 Log.d(TAG, "Enable Password Protection for MifareUltralightEV1"  );
+    if(readMode == false){
+      if(SdkLevel.getLevel() >= SdkLevel.LEVEL_GINGERBREAD){
+        MULEV1EnPwdProt(Enable,PageNumber);
+      }
+    } 
+  }
+  
+  /* Used for  foreground dispatch
+  public void Initialize() {
+	    
+		nfcAdapter = NfcAdapter.getDefaultAdapter(activity);
+        mPendingIntent = PendingIntent.getActivity(activity, 0, new Intent(activity, getClass()).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), 0);
+        
+        IntentFilter ndef = new IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED);
+		IntentFilter ntech = new IntentFilter(NfcAdapter.ACTION_TECH_DISCOVERED);
+		IntentFilter td = new IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED);
+        mFilters = new IntentFilter[] {ntech,ndef,td};
+		mTechLists  = new String[][] { new String[] { NfcA.class.getName(),MifareUltralight.class.getName(),NdefFormatable.class.getName()},
+                                       new String[] { NfcA.class.getName(),MifareUltralight.class.getName(),Ndef.class.getName()}
+									 };
+		
+		appendLog("Intent Filter creato!");	
+									 
+  }
+  */ 
+  
+  public void onPause() {
+    Log.d(TAG, "OnPause method started.");
+	if (nfcAdapter != null) {
+		/* Used for  foreground dispatch
+			nfcAdapter.disableForegroundDispatch(activity);
+		*/
+		GingerbreadUtil.disableNFCAdapter(activity, nfcAdapter);
+    }  
+  }
+
+  @Override
+  public void onDelete() {
+    // TODO Auto-generated method stub
+    // need to delete the nearfieldActivity
+
+  }
+
+  @Override
+  public void onStop() {
+    // TODO Auto-generated method stub
+  }
+
+  @Override    //when a Tag is discovered....
+  public void onNewIntent(Intent intent) {
+    Log.d(TAG, "Nearfield on onNewIntent.  Intent is: " + intent);
+	//appendLog("Nearfield on onNewIntent.  Intent is: " + intent);
+    resolveIntent(intent);  
+  }
+  
+
+  // TODO: Re-enable NFC communication if it had been disabled
+  @Override
+  public void onResume() {
+    Intent intent = activity.getIntent();
+    Log.d(TAG, "Nearfield on onResume.  Intent is: " + intent);
+	/* Used for  foreground dispatch
+	if (nfcAdapter != null) 
+		{
+			nfcAdapter.enableForegroundDispatch(activity, mPendingIntent, mFilters, mTechLists);
+		}
+	*/
+  }
+
+  void resolveIntent(Intent intent) {
+	Log.d(TAG, "resolve intent. Intent is: " + intent);
+	String action = intent.getAction(); 
+	//if (NfcAdapter.ACTION_NDEF_DISCOVERED.equals(action) ||  NfcAdapter.ACTION_TECH_DISCOVERED.equals(action) || NfcAdapter.ACTION_TAG_DISCOVERED.equals(action)) {
+	if (NfcAdapter.ACTION_TAG_DISCOVERED.equals(action)) {				//if the action is as expected
+		tag = (Tag) intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);	//get the tag data available
+		GetUid(ByteArrayToHexString(tag.getId()));						//the UID
+		assert tag != null;
+		detectTagData(tag);
+	}
+	
+  }
+  
+  // detect all the data available
+  void detectTagData(Tag tag) {
+	for (String tech : tag.getTechList()) {
+        if (tech.equals(MifareClassic.class.getName())) {
+			MifareClassic mifareTag = MifareClassic.get(tag);
+            String type = "Unknown";         
+            switch (mifareTag.getType()) {
+                case MifareClassic.TYPE_CLASSIC:
+                    type = "Classic";
+					break;
+                case MifareClassic.TYPE_PLUS:
+                    type = "Plus";
+                    break;
+                case MifareClassic.TYPE_PRO:
+                    type = "Pro";
+                    break;
+            }
+            GetType(type); 
+			GetSize(mifareTag.getSize());
+			GetSectors(mifareTag.getSectorCount());
+			GetBlocks(mifareTag.getBlockCount());
+        }
+		if (tech.equals(MifareUltralight.class.getName())) {
+            MifareUltralight mifareUlTag = MifareUltralight.get(tag);
+            String type = "Unknown";
+            switch (mifareUlTag.getType()) {
+                case MifareUltralight.TYPE_ULTRALIGHT:
+                    type = "Ultralight";						//Tag could be an old basic Ultralight
+					GetVersionMifareUltralightEV1(mifareUlTag); //or a new UltralightEV1
+					if (cfgOffset == 0x010)						//Different memory size so I need to know where the are the speciale pages
+						type = "Ultralight EV1 (MF0UL11)";
+					if (cfgOffset == 0x025)
+						type = "Ultralight EV1 (MF0UL21)";
+                    break;
+                case MifareUltralight.TYPE_ULTRALIGHT_C:
+                    type = "Ultralight C";
+                    break;
+            }
+            GetType(type);
+        }
+	}
+  }
+  
+  //Read a MifareClassic Block or MifareUltralight Pages ( MifareUltralight.readPages reads 4 pages)
+void rMCB(int BTR) {
+	for (String tech : tag.getTechList()) {
+		if (tech.equals(MifareClassic.class.getName())) {
+			MifareClassic mifareTag = MifareClassic.get(tag);
+			int Sector = FindSector(BTR);
+			try {
+				mifareTag.connect();
+				if (mifareTag.isConnected())
+				{
+					if(mifareTag.authenticateSectorWithKeyA(Sector, hexStringToByteArray(AuthKeyA))) {
+						GetMifareClassicBlock(ByteArrayToHexString(mifareTag.readBlock(BTR)));
+					}
+				}
+				mifareTag.close();
+			}
+			catch (IOException e) {
+				e.printStackTrace();
+				
+			} 
+			finally{
+				if(mifareTag!=null){
+					try {
+						mifareTag.close();
+					} 
+					catch (IOException e) {
+						e.printStackTrace();
+					}
+				}
+			}	
+		}
+		if (tech.equals(MifareUltralight.class.getName())) {
+			MifareUltralight mifareUlTag = MifareUltralight.get(tag);
+			try {
+				mifareUlTag.connect();
+				if (mifareUlTag.isConnected())
+				{
+					if (PasswordEV1.equals(""))							//if is not a password protected tag
+						GetMifareUltralightPages(ByteArrayToHexString(mifareUlTag.readPages(BTR)));
+					else
+						if(MULEV1Auth(mifareUlTag, PasswordEV1))		//try to authenticate
+							GetMifareUltralightPages(ByteArrayToHexString(mifareUlTag.readPages(BTR)));
+				}
+				mifareUlTag.close();
+			}
+			catch (IOException e) {
+				e.printStackTrace();
+				
+			} 
+			finally{
+				if(mifareUlTag!=null){
+					try {
+						mifareUlTag.close();
+					} 
+					catch (IOException e) {
+						e.printStackTrace();
+					}
+				}
+			}	
+			
+		}
+	}	  
+}
+	// Write a MifareClassic BLock or a MifareUltralight Page
+void wMCB(int BTW, String DTW) {
+	for (String tech : tag.getTechList()) {
+		if (tech.equals(MifareClassic.class.getName())) {
+			MifareClassic mifareTag = MifareClassic.get(tag);
+			int Sector = FindSector(BTW);
+			try {
+				mifareTag.connect();
+				if (mifareTag.isConnected())
+				{
+					if(mifareTag.authenticateSectorWithKeyA(Sector, hexStringToByteArray(AuthKeyA))) {
+						while (DTW.length() < 32) //16 bytes every block
+						{
+							DTW = DTW + "0";
+						}
+						mifareTag.writeBlock(BTW,hexStringToByteArray(DTW));
+					}
+				}
+				mifareTag.close();
+			}
+			catch (IOException e) {
+				e.printStackTrace();
+				
+			} 
+			finally{
+				if(mifareTag!=null){
+					try {
+						mifareTag.close();
+					} 
+					catch (IOException e) {
+						e.printStackTrace();
+					}
+				}
+			}	
+		}
+		if (tech.equals(MifareUltralight.class.getName())) {
+			while (DTW.length() < 8)	//4 bytes every page
+			{
+				DTW = DTW + "0";
+			}
+			MifareUltralight mifareUlTag = MifareUltralight.get(tag);
+			try {
+				mifareUlTag.connect();
+				if (mifareUlTag.isConnected())
+				{
+					if (PasswordEV1.equals(""))							//if is not a password protected tag
+						mifareUlTag.writePage(BTW,hexStringToByteArray(DTW));
+					else
+						if(MULEV1Auth(mifareUlTag, PasswordEV1))		//try to authenticate
+							mifareUlTag.writePage(BTW,hexStringToByteArray(DTW));	
+				}
+				mifareUlTag.close();
+			}
+			catch (IOException e) {
+				e.printStackTrace();	
+			} 
+			finally{
+				if(mifareUlTag!=null){
+					try {
+						mifareUlTag.close();
+					} 
+					catch (IOException e) {
+						e.printStackTrace();
+					}
+				}
+			}	
+		}
+	}	  
+}
+
+// write the password and the pack in a MifareUltralightEV1 
+// (the pack is used to check if the tag is correct
+//  when I authenticate with the correct password the tag send back the pack, 
+//  I need to check if the pack value has the value that I expect so I am sure if  the Tag is true or not)
+void setMULEV1PwdPack(String Password, String Pack)
+{
+	while (Password.length() < 8)	//4 bytes every page
+	{
+		Password = Password + "0";
+	}
+	while (Pack.length() < 8)	//4 bytes every page
+	{
+		Pack = Pack + "0";
+	}
+	MifareUltralight mifareUlTag = MifareUltralight.get(tag);
+	GetVersionMifareUltralightEV1(mifareUlTag);		//I need to know the Tag version so I know the page number where to write the password
+	boolean check = false;
+	try {
+		mifareUlTag.connect();
+		if (PasswordEV1.equals(""))						//if no passord i can try to write the new value without authentication
+			check = true;
+		else
+			if(MULEV1Auth(mifareUlTag, PasswordEV1))	//if password I have to authenticate before to write new password and pack
+				check = true;
+		if (check)
+		{
+			try {
+				byte[] pass = hexStringToByteArray(Password);
+				byte[] pack = hexStringToByteArray(Pack);
+				if (mifareUlTag.isConnected())
+				{
+					byte[] response = mifareUlTag.transceive(new byte[] {			//write password
+						(byte) 0xA2, // WRITE
+						(byte)((cfgOffset + 2) & 0x0FF),    
+						pass[0], pass[1], pass[2], pass[3] 
+					});
+					response = mifareUlTag.transceive(new byte[] {					//write pack
+						(byte) 0xA2, // WRITE
+						(byte)((cfgOffset + 3) & 0x0FF),    
+						pack[0], pack[1], (byte)0x00, (byte)0x00 
+					});
+				}
+				mifareUlTag.close();
+			}
+			catch (IOException e){
+				e.printStackTrace();
+		/*
+				StringWriter errors = new StringWriter();
+				e.printStackTrace(new PrintWriter(errors));
+				appendLog(errors.toString());
+		*/
+			}
+			finally {
+				
+			}
+		}
+	}
+	catch (IOException e){
+		e.printStackTrace();
+		/*
+		StringWriter errors = new StringWriter();
+		e.printStackTrace(new PrintWriter(errors));
+		appendLog(errors.toString());
+		*/
+	}
+	finally {
+		if(mifareUlTag!=null){
+			try {
+					mifareUlTag.close();
+				} 
+			catch (IOException e) {
+					e.printStackTrace();
+			}
+		}
+	}
+	
+	
+	
+}
+
+// Authentication for MifareUltralightEV1
+public boolean MULEV1Auth(MifareUltralight mifareUlTag, String Password)
+{
+	boolean Auth = false;
+	while (Password.length() < 8)	//4 bytes every page
+	{
+		Password = Password + "0";
+	}
+	try {
+		if (mifareUlTag.isConnected())
+		{
+			byte[] pass = hexStringToByteArray(Password);
+			byte[] response = mifareUlTag.transceive(new byte[] {
+				(byte) 0x1B, //PWD_AUTH
+				pass[0], pass[1], pass[2], pass[3] 
+			});
+			if ((response != null) && (response.length >= 2)) { // if the password is correct
+				if (PackEV1.equals(ByteArrayToHexString(response)))  //check if the response is equal to PackEV1 (sent from the app)
+					Auth = true;
+				else 
+					Auth = false;
+			}
+			else
+				Auth =  false;
+		}
+		
+	}
+	catch (IOException e){
+		e.printStackTrace();
+		/*
+		StringWriter errors = new StringWriter();
+		e.printStackTrace(new PrintWriter(errors));
+		appendLog(errors.toString());
+		*/
+	}	
+	finally {
+		/*
+		if(mifareUlTag!=null){
+			try {
+				//mifareUlTag.close();
+			} 
+			catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+		*/
+	}
+	return Auth;
+}
+// Enable/Disable the password protection, and first page to protect of a MifareUltralightEV1
+// Usally from page 4 (it is the first page for user)
+void MULEV1EnPwdProt(boolean Enable, int PageNumber)
+{
+	MifareUltralight mifareUlTag = MifareUltralight.get(tag);
+	GetVersionMifareUltralightEV1(mifareUlTag);							//I need to know the Tag version so I know the page number where to write the password
+	boolean check = false;
+	try {
+		mifareUlTag.connect();
+		if (PasswordEV1.equals(""))						//if no passord i can try to enable  without authentication
+			check = true;
+		else
+			if(MULEV1Auth(mifareUlTag, PasswordEV1))	//if password I have to authenticate before to disable the authentication
+				check = true;
+		if (check)
+		{
+			try {	
+				if (mifareUlTag.isConnected())
+				{
+					byte[] response = mifareUlTag.transceive(new byte[] {		//Read old values
+						(byte) 0x30, // READ
+						(byte)(cfgOffset & 0x0FF)  // page address
+					});
+					if ((response != null) && (response.length >= 16)) {
+					// success
+					// NOTE that READ will return *4 pages* starting at page address
+						byte auth0 = (byte)0xFF;								//Default Value
+						if (Enable) {											//if I want enable protection
+							auth0 = (byte)(PageNumber & 0x0FF);
+						}
+						byte[] writeResponse = mifareUlTag.transceive(new byte[] {
+							(byte) 0xA2, // WRITE
+							(byte)((cfgOffset + 0) & 0x0FF),              // page address
+							response[0], response[1], response[2], auth0  // new page data
+						});
+						byte access = (byte)(response[4] & 0x07F);				//disable
+						if (Enable) {
+							access |= (byte)0x80;								//set to 1 the 8bit of the Prot byte to enable protection
+						}
+						writeResponse = mifareUlTag.transceive(new byte[] {
+							(byte) 0xA2, // WRITE
+							(byte)((cfgOffset + 1) & 0x0FF),                // page address
+							access, response[5], response[6], response[7],  // new page data
+						});
+					}
+				}
+			}
+			catch (IOException e){
+				e.printStackTrace();
+		/*
+				StringWriter errors = new StringWriter();
+				e.printStackTrace(new PrintWriter(errors));
+				appendLog(errors.toString());
+		*/	
+			}	
+		}
+	}
+	catch (IOException e){
+			e.printStackTrace();
+		/*
+			StringWriter errors = new StringWriter();
+			e.printStackTrace(new PrintWriter(errors));
+			appendLog(errors.toString());
+		*/	
+	}
+	finally {
+		if(mifareUlTag!=null){
+			try {
+				mifareUlTag.close();
+			} 
+			catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+	
+	
+}
+// Get Version of a MifareUltralightEV1 Tag is important to know where are the spacial pages
+void GetVersionMifareUltralightEV1(MifareUltralight mifareTag)
+{
+	byte[] command = new byte[] {(byte) 0x60};
+	try {
+		mifareTag.connect();
+		if (mifareTag.isConnected())
+		{
+			byte[] response = mifareTag.transceive(command); // GET_VERSION
+			if ((response != null) && (response.length >= 8)) {
+			// success
+				if ((response[0] == (byte)0x00) && (response[1] == (byte)0x04)) {
+				// tag is from NXP
+					if (response[2] == (byte)0x03) {
+					// MIFARE Ultralight
+						if ((response[4] == (byte)0x01) && (response[5] == (byte)0x00)) {
+						// MIFARE Ultralight EV1 (V0)
+							switch (response[6]) {
+								case (byte)0x0B:
+									// MF0UL11
+									cfgOffset = 0x010;
+									break;
+								case (byte)0x0E:
+									// MF0UL21
+									cfgOffset = 0x025;
+									break;
+								default:
+									// unknown
+									break;
+							}
+						}
+					}
+				}
+			}
+		}
+		mifareTag.close();
+	}
+	catch (IOException e) {
+		e.printStackTrace();
+		/*
+		StringWriter errors = new StringWriter();
+		e.printStackTrace(new PrintWriter(errors));
+		appendLog(errors.toString());
+		*/
+	}
+	finally {
+		if(mifareTag!=null){
+			try {
+				mifareTag.close();
+			} 
+			catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+}
+
+//Find the sector to authenticate for a MifareClassic Tag
+  public int FindSector(int BTR)
+  {
+	int Sect = 0;
+	if (BTR <= 127) //because Mifare 4K memory is like 1K and 2K until block 127 every sector 4 blocks than each sector 15 blocks
+	{
+		Sect = (BTR / 4);
+	}
+	else
+	{
+		if (BTR >= 128 && BTR <= 143)
+			Sect = 32;
+		if (BTR >= 144 && BTR <= 159)
+			Sect = 33;
+		if (BTR >= 160 && BTR <= 176)
+			Sect = 34;
+		if (BTR >= 176 && BTR <= 191)
+			Sect = 35;
+		if (BTR >= 192 && BTR <= 207)
+			Sect = 36;
+		if (BTR >= 208 && BTR <= 223)
+			Sect = 37;
+		if (BTR >= 224 && BTR <= 239)
+			Sect = 38;
+		if (BTR >= 240 && BTR <= 255)
+			Sect = 39;
+	}
+	return Sect;
+  }
+  
+  
+	private String ByteArrayToHexString(byte [] inarray) {
+	    int i, j, in;
+	    String [] hex = {"0","1","2","3","4","5","6","7","8","9","A","B","C","D","E","F"};
+	    String out= "";
+	
+	    for(j = 0 ; j < inarray.length ; ++j) 
+	        {
+	        in = (int) inarray[j] & 0xff;
+	        i = (in >> 4) & 0x0f;
+	        out += hex[i];
+	        i = in & 0x0f;
+	        out += hex[i];
+	        }
+	    return out;
+	}
+	
+	private  byte[] hexStringToByteArray(String instring) {
+    int len = instring.length();
+    byte[] out = new byte[len / 2];
+    for (int i = 0; i < len; i += 2) {
+        out[i / 2] = (byte) ((Character.digit(instring.charAt(i), 16) << 4)
+                             + Character.digit(instring.charAt(i+1), 16));
+    }
+    return out;
+}
+
+/*used when i want to save the log file on memory for some check
+public void appendLog(String text)
+{       
+   File logFile = new File("sdcard/MyNFCLog.txt");
+   if (!logFile.exists())
+   {
+      try
+      {
+         logFile.createNewFile();
+      } 
+      catch (IOException e)
+      {
+         // TODO Auto-generated catch block
+         e.printStackTrace();
+      }
+   }
+   try
+   {
+      //BufferedWriter for performance, true to set append to file flag
+      BufferedWriter buf = new BufferedWriter(new FileWriter(logFile, true)); 
+      buf.append(text);
+      buf.newLine();
+	  buf.flush();
+      buf.close();
+   }
+   catch (IOException e)
+   {
+      // TODO Auto-generated catch block
+      e.printStackTrace();
+   }
+}
+*/
+}
+
